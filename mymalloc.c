@@ -137,7 +137,7 @@ void *mymalloc(size_t s) {
     }
 
     block_t *block = (block_t*) mem_ptr;
-    block->size = alloc_size - sizeof(block_t) = sizeof(footer_t);
+    block->size = alloc_size - sizeof(block_t) - sizeof(footer_t);
     block->is_alloc = false;
     block->magic_num = MAGIC_NUM;
     block->next = NULL;
