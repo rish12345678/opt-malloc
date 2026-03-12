@@ -6,10 +6,6 @@
 #include <stdbool.h>
 #include <sys/mman.h>
 
-// Include any other headers we need here
-
-// NOTE: You should NOT include <stdlib.h> in your final implementation
-
 #include <debug.h> // definition of debug_printf
 
 
@@ -38,25 +34,6 @@ block_t* head = NULL;
 static size_t page_size = 0;
 
 
-/*
-    Plan:
-
-    Store a Linked List Embedded in the memory we get from the sbrk call.
-    This Linked List should store all the blocks that have memory, labeling
-    the following memory block as either free or allocated.  If a block_t says
-    that it is free that means we can give the user their memory from this block
-    if block_t->size >= requested memory.  If not, keep going through the Linked List
-    until we find a block that we can give the user.  mycalloc just calls mymalloc
-    with the parameter being [size of element x number of elements].  If we go
-    through our entire LinkedList, and can not find a block of memory that is large enough
-    we will just call sbrk again with HEAPSIZE to get a larger heap to pull from.
-
-    To free memory, they pass in the pointer to the memory address they wish to free.
-    We then take that, go to the struct that preceedes that block of memory and we set that
-    to have a isFree value of true;
-
-*/
-
 void insert_block(block_t *block) {
   block_t *curr = head;
   block_t *prev = NULL;
@@ -73,19 +50,31 @@ void insert_block(block_t *block) {
     head = block;
   }
 
-  // Try :  manual block->next rather thn curr
-  if (block->next && (char*)block + sizeof(block_t) + block->size == (char*)block->next) {
-    debug_printf("free: coalesce blocks of size %zu and %zu to new block of size %zu\n", block->size, block->next->size, block->size + sizeof(block_t) + block->next->size);
+  // Coalesce with the NEXT block in memory
+  // Added sizeof(footer_t) to check adjacency properly
+  if (block->next && (char*)block + sizeof(block_t) + block->size + sizeof(footer_t) == (char*)block->next) {
+    debug_printf("free: coalesce blocks of size %zu and %zu to new block of size %zu\n", block->size, block->next->size, block->size + sizeof(block_t) + sizeof(footer_t) + block->next->size);
     
-    block->size += sizeof(block_t) + block->next->size;
+    // Size must include the swallowed header and footer!
+    block->size += sizeof(block_t) + sizeof(footer_t) + block->next->size;
     block->next = block->next->next;
+    
+    // Update the new combined block's footer with the new size
+    footer_t *merged_footer = (footer_t*)((char*)block + sizeof(block_t) + block->size);
+    merged_footer->size = block->size;
   }
 
-  if (prev && (char*)prev + sizeof(block_t) + prev->size == (char*)block) {
-    debug_printf("free: coalesce blocks of size %zu and %zu to new block of size %zu\n", prev->size, block->size, prev->size + sizeof(block_t) + block->size);
+  // Coalesce with the PREV block in memory
+  // Added sizeof(footer_t) to check adjacency properly
+  if (prev && (char*)prev + sizeof(block_t) + prev->size + sizeof(footer_t) == (char*)block) {
+    debug_printf("free: coalesce blocks of size %zu and %zu to new block of size %zu\n", prev->size, block->size, prev->size + sizeof(block_t) + sizeof(footer_t) + block->size);
 
-    prev->size += sizeof(block_t) + block->size;
+    prev->size += sizeof(block_t) + sizeof(footer_t) + block->size;
     prev->next = block->next;
+    
+    // Update the new combined block's footer with the new size
+    footer_t *merged_footer = (footer_t*)((char*)prev + sizeof(block_t) + prev->size);
+    merged_footer->size = prev->size;
   }
 }
 
@@ -138,19 +127,18 @@ void *mymalloc(size_t s) {
 
     block_t *block = (block_t*) mem_ptr;
     block->size = alloc_size - sizeof(block_t) - sizeof(footer_t);
-    block->is_alloc = false;
+    block->is_alloc = true; // Mark as allocated for large block
     block->magic_num = MAGIC_NUM;
     block->next = NULL;
     block->prev = NULL;
 
     footer_t *footer = (footer_t*) ((char*) mem_ptr + sizeof(block_t) + block->size);
-    footer-> size = alloc_size - sizeof(block_t) = sizeof(footer_t);
-    footer->is_alloc = false;
+    footer->size = alloc_size - sizeof(block_t) - sizeof(footer_t);
+    footer->is_alloc = true; // Mark as allocated
     footer->magic_num = MAGIC_NUM;
 
     return (void*) (block + 1);
   }
-
 
   block_t *curr = head;
   block_t *prev = NULL;
@@ -161,17 +149,16 @@ void *mymalloc(size_t s) {
     if (curr->size >= s) {
       debug_printf("malloc: block of size %zu found\n", curr->size);
 
-      // Make the free list skip over that chunk that is good enough to give to the user
-      prev = curr->prev;
+      // Removed prev = curr->prev; wass vausing seg faults
+      // Local tracking variable prev is already the correct predecessor in the loop.
       if (prev) {
         prev->next = curr->next;
       } else {
         head = curr->next;
       }
 
-      
       if (curr->size >= s + sizeof(block_t) + 8 + sizeof(footer_t)) {
-        block_t *block_for_extraneous_memory = (block_t*)((char*)curr + sizeof(block_t) + s + sizeof(footer_t));
+        block_t *new_block = (block_t*)((char*)curr + sizeof(block_t) + s + sizeof(footer_t));
         footer_t *footer_for_return_memory = (footer_t*)((char*)curr + sizeof(block_t) + s);
         footer_t *footer_for_extraneous_memory = (footer_t*)((char*)curr + sizeof(block_t) + curr->size);
 
@@ -185,15 +172,18 @@ void *mymalloc(size_t s) {
         new_block->size = curr->size - s - sizeof(block_t) - sizeof(footer_t);
         new_block->is_alloc = false;
         new_block->magic_num = MAGIC_NUM;
-        new_block->prev = curr;
-        new_block->next = curr->next;
+        new_block->prev = NULL; 
+        new_block->next = NULL;
 
-        
         debug_printf("malloc: splitting - blocks of size %zu and %zu created\n", s, new_block->size);
                      
         curr->size = s;
         curr->is_alloc = true;
         insert_block(new_block);
+      } else {
+        curr->is_alloc = true;
+        footer_t *footer_for_return_memory = (footer_t*)((char*)curr + sizeof(block_t) + curr->size);
+        footer_for_return_memory->is_alloc = true;
       }
       return (void*) (curr + 1);
     }
@@ -222,16 +212,36 @@ void *mymalloc(size_t s) {
   block_t *block = (block_t*) new_heap_start;
   block->size = page_size - sizeof(block_t) - sizeof(footer_t);
 
-  // Check this
   if (block->size >= s + sizeof(footer_t) + sizeof(block_t) + 8 + sizeof(footer_t)) {
-    block_t *new_block = (block_t*)((char*)block + sizeof(block_t) + s);
-    new_block->size = block->size - s - sizeof(block_t);
+    block_t *new_block = (block_t*)((char*)block + sizeof(block_t) + s + sizeof(footer_t));
+    new_block->size = block->size - s - sizeof(block_t) - sizeof(footer_t);
+    new_block->is_alloc = false;
+    new_block->magic_num = MAGIC_NUM;
+
+    footer_t *new_block_footer = (footer_t*)((char*)new_block + sizeof(block_t) + new_block->size);
+    new_block_footer->size = new_block->size;
+    new_block_footer->is_alloc = false;
+    new_block_footer->magic_num = MAGIC_NUM;
 
     debug_printf("malloc: splitting - blocks of size %zu and %zu created\n", s, new_block->size);
 
     block->size = s;
+    block->is_alloc = true;
+
+    footer_t *block_footer = (footer_t*)((char*)block + sizeof(block_t) + block->size);
+    block_footer->size = block->size;
+    block_footer->is_alloc = true;
+    block_footer->magic_num = MAGIC_NUM;
+
     insert_block(new_block);
+  } else {
+    block->is_alloc = true;
+    footer_t *block_footer = (footer_t*)((char*)block + sizeof(block_t) + block->size);
+    block_footer->size = block->size;
+    block_footer->is_alloc = true;
+    block_footer->magic_num = MAGIC_NUM;
   }
+  
   return (void*)(block + 1);
 }
 
@@ -242,7 +252,7 @@ void *mycalloc(size_t nmemb, size_t s) {
     return NULL;
   }
 
-  // Just like the fr Calloc system call does
+  // Just like the Calloc system call does
   memset(ptr, 0, total);
   return ptr;
 }
@@ -258,8 +268,14 @@ void myfree(void *ptr) {
 
   block_t *block = (block_t*)ptr - 1;
 
-  if (block->size + sizeof(block_t) > page_size) {
-    size_t region_size = block->size + sizeof(block_t);
+  // Set as unallocated right away
+  block->is_alloc = false;
+  footer_t *block_footer = (footer_t*)((char*)block + sizeof(block_t) + block->size);
+  block_footer->is_alloc = false;
+
+  // Fixed large block condition to include footer size
+  if (block->size + sizeof(block_t) + sizeof(footer_t) > page_size) {
+    size_t region_size = block->size + sizeof(block_t) + sizeof(footer_t);
     debug_printf("free: munmap region of size %zu\n", region_size);
     munmap(block, region_size);
   } else {
@@ -270,7 +286,8 @@ void myfree(void *ptr) {
     block_t *prev = NULL;
 
     while (curr) {
-      if (curr->size == page_size - sizeof(block_t)) {
+      // Fixed empty page condition to include footer
+      if (curr->size == page_size - sizeof(block_t) - sizeof(footer_t)) {
         empty_pages++;
         if (empty_pages > 2) {
           block_t *to_free = curr;
@@ -282,7 +299,8 @@ void myfree(void *ptr) {
           
           curr = curr->next;
           
-          size_t region_size = to_free->size + sizeof(block_t);
+          // Fixed munmap size to include footer
+          size_t region_size = to_free->size + sizeof(block_t) + sizeof(footer_t);
           debug_printf("free: munmap region of size %zu\n", region_size);
           munmap(to_free, region_size);
           continue;
@@ -293,5 +311,3 @@ void myfree(void *ptr) {
     }
   }
 }
-
-
